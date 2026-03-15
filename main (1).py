@@ -285,3 +285,92 @@ def run_backtest(df, htf, fga):
         })
     return {"equity": equity, "eqc": eqc, "tlog": tlog,
             "wins": wins, "losses": losses, "warmup": WARMUP}
+    
+# ═══════════════════════════════════════════════════
+# REPORT
+# ═══════════════════════════════════════════════════
+
+def report(res, df, fg_series, fga):
+    eq   = res["equity"]; eqc = res["eqc"]
+    tlog = res["tlog"];   W   = res["warmup"]
+    n    = len(eqc)
+
+    eq_s = pd.Series(eqc, index=df.index[W: W+n])
+    rets = eq_s.pct_change().dropna()
+    tot  = res["wins"] + res["losses"]
+
+    pnls = [t["pnl_usd"] for t in tlog]
+    wp   = [p for p in pnls if p > 0]
+    lp   = [p for p in pnls if p <= 0]
+    pf   = sum(wp)/abs(sum(lp)) if lp else float("inf")
+    wr   = res["wins"]/tot*100 if tot else 0
+    aw   = np.mean(wp) if wp else 0
+    al   = np.mean(lp) if lp else 0
+    exp  = (wr/100)*aw + (1-wr/100)*al
+    avg_r= np.mean([t["r_multiple"] for t in tlog]) if tlog else 0
+    avg_b= np.mean([t["bars_held"]  for t in tlog]) if tlog else 0
+
+    dd   = (eq_s.cummax()-eq_s)/eq_s.cummax()
+    mdd  = dd.max()*100
+    tr   = (eq/INITIAL_CAPITAL-1)*100
+    ppy  = 365.25*24*(4 if TIMEFRAME=="15m" else 1)
+    sh   = (rets.mean()/rets.std())*np.sqrt(ppy) if rets.std() else 0
+    dsd  = rets[rets<0].std()
+    so   = (rets.mean()/dsd)*np.sqrt(ppy) if dsd else 0
+    cal  = (tr/100)/(mdd/100) if mdd else 0
+
+    cw=cl=mw=ml=0
+    for p in pnls:
+        if p>0: cw+=1; cl=0
+        else:   cl+=1; cw=0
+        mw=max(mw,cw); ml=max(ml,cl)
+
+    by_r={}
+    for t in tlog: by_r.setdefault(t["reason"],[]).append(t["pnl_usd"])
+
+    pf_s = f"{pf:.2f}" if pf!=float("inf") else "∞"
+    wl   = f"{abs(aw/al):.2f}×" if al else "N/A"
+    bep  = (1/(1+(aw/abs(al))))*100 if al else 0
+    W_   = 67
+
+    print("\n"+"═"*W_)
+    print(f"  BTC/USDT {TIMEFRAME} — v7  (geometry fix: stop 1.0×ATR, target 2.5R)")
+    print("═"*W_)
+    print(f"  Final equity         : ${eq_s.iloc[-1]:>12,.2f}  (started ${INITIAL_CAPITAL:,.0f})")
+    print(f"  Total return         : {tr:>+10.2f}%")
+    print(f"  Max drawdown         : {mdd:>10.2f}%")
+    print("─"*W_)
+    print(f"  Total trades         : {tot:>10d}")
+    print(f"  Win rate             : {wr:>10.1f}%  (break-even at this W/L: {bep:.1f}%)")
+    print(f"  Profit factor        : {pf_s:>10}  (viable ≥ 1.3)")
+    print(f"  Avg win              : ${aw:>10,.2f}")
+    print(f"  Avg loss             : ${al:>10,.2f}")
+    print(f"  Win / Loss ratio     : {wl:>10}")
+    print(f"  Expectancy / trade   : ${exp:>10,.2f}")
+    print(f"  Avg R multiple       : {avg_r:>10.3f}R")
+    print(f"  Avg hold             : {avg_b:>10.1f} bars  ({avg_b*15/60:.1f}h)" if TIMEFRAME=="15m"
+          else f"  Avg hold             : {avg_b:>10.1f} bars  ({avg_b:.1f}h)")
+    print("─"*W_)
+    print(f"  Sharpe ratio         : {sh:>10.2f}")
+    print(f"  Sortino ratio        : {so:>10.2f}")
+    print(f"  Calmar ratio         : {cal:>10.2f}")
+    print("─"*W_)
+    print(f"  Max consec. wins     : {mw:>10d}")
+    print(f"  Max consec. losses   : {ml:>10d}")
+    print("─"*W_)
+    print("  Exit breakdown:")
+    n_hard=0
+    for reason, ps in sorted(by_r.items()):
+        n_=len(ps); tot_=sum(ps); avg_=np.mean(ps)
+        wr_=sum(1 for p in ps if p>0)/n_*100
+        print(f"    {reason:<14}: {n_:>4} trades  avg ${avg_:>7.2f}  "
+              f"total ${tot_:>9,.2f}  WR {wr_:>5.1f}%")
+        if reason=="stop": n_hard=n_
+
+    stop_pct = (n_hard+len(by_r.get("trailing",[]))) / tot*100 if tot else 0
+    tgt_n    = len(by_r.get("target",[]))
+    tgt_pct  = tgt_n/tot*100 if tot else 0
+    flag = "" if stop_pct<60 else (" " if stop_pct<75 else "")
+    print("─"*W_)
+    print(f"  Combined stop rate   : {stop_pct:>10.1f}%  {flag}")
+    print(f"  Target hit rate      : {tgt_pct:>10.1f}%")
