@@ -45,3 +45,57 @@ HTF_RSI_MIN   = 50
 USE_SESSION = True;  SESSION_S = 6;  SESSION_E = 21
 USE_FG      = True;  FG_MIN = 25;   FG_MAX = 80
 
+# ═══════════════════════════════════════════════════
+# ON-CHAIN
+# ═══════════════════════════════════════════════════
+
+def fetch_fear_greed(limit=1000) -> pd.Series:
+    print("Fetching Fear & Greed Index...")
+    try:
+        r = requests.get(
+            f"https://api.alternative.me/fng/?limit={limit}&format=json",
+            timeout=15)
+        r.raise_for_status()
+        s = pd.Series({
+            pd.Timestamp(int(d["timestamp"]), unit="s", tz="UTC"): int(d["value"])
+            for d in r.json()["data"]
+        }).sort_index()
+        print(f"  F&G: {len(s)} days ({s.index[0].date()} → {s.index[-1].date()})")
+        return s
+    except Exception as e:
+        print(f"  [WARN] F&G unavailable: {e}")
+        return pd.Series(dtype=float)
+
+
+def align_fg(fg: pd.Series, idx: pd.DatetimeIndex) -> pd.Series:
+    if fg.empty:
+        return pd.Series(50, index=idx)
+    return (fg.reindex(fg.index.union(idx))
+              .ffill().infer_objects(copy=False)
+              .reindex(idx))
+    
+# ═══════════════════════════════════════════════════
+# DATA
+# ═══════════════════════════════════════════════════
+
+def download_ohlcv() -> pd.DataFrame:
+    ex = ccxt.binance({"enableRateLimit": True,
+                       "options": {"defaultType": "spot"}})
+    since = ex.parse8601(START_DATE)
+    rows  = []
+    print(f"Downloading {SYMBOL} {TIMEFRAME}...")
+    while True:
+        batch = ex.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME,
+                               since=since, limit=1000)
+        if not batch: break
+        rows.extend(batch)
+        print(f"  {len(rows):,} candles", end="\r")
+        if len(batch) < 1000: break
+        since = batch[-1][0] + 1
+        time.sleep(ex.rateLimit / 1000)
+    print(f"\n  Done — {len(rows):,} candles")
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume"])
+    df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    df.set_index("time", inplace=True)
+    df.sort_index(inplace=True)
+    return df.drop(columns=["ts"])
