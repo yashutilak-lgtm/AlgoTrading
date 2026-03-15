@@ -99,3 +99,24 @@ def download_ohlcv() -> pd.DataFrame:
     df.set_index("time", inplace=True)
     df.sort_index(inplace=True)
     return df.drop(columns=["ts"])
+
+# ═══════════════════════════════════════════════════
+# HTF
+# ═══════════════════════════════════════════════════
+
+def build_htf(df: pd.DataFrame) -> pd.DataFrame:
+    tf = "1h" if TIMEFRAME == "15m" else "4h"
+    h_close = df["close"].resample(tf).last().dropna()
+    ema = h_close.ewm(span=HTF_EMA_P, adjust=False).mean()
+    d   = h_close.diff()
+    g   = d.clip(lower=0).rolling(HTF_RSI_P).mean()
+    lo  = (-d.clip(upper=0)).rolling(HTF_RSI_P).mean()
+    rsi = 100 - (100 / (1 + g / lo.replace(0, np.nan)))
+    htf = pd.DataFrame({
+        "htf_trend_up": (h_close > ema).astype(bool),
+        "htf_slope_up": (ema > ema.shift(3)).astype(bool),
+        "htf_rsi_ok":   (rsi >= HTF_RSI_MIN).astype(bool),
+    }, index=h_close.index)
+    return (htf.reindex(htf.index.union(df.index))
+               .ffill().infer_objects(copy=False)
+               .reindex(df.index))
