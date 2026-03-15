@@ -160,3 +160,128 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"Indicators done ({TIMEFRAME}).")
     return df
+
+# ═══════════════════════════════════════════════════
+# BACKTEST
+# ═══════════════════════════════════════════════════
+
+def run_backtest(df, htf, fga):
+    equity = INITIAL_CAPITAL
+    pos    = None
+    eqc    = []
+    tlog   = []
+    wins = losses = 0
+    WARMUP = max(200 + EMA_MED, SWING_W * 4, ADX_P * 3)
+
+    cl  = df["close"].values;   op = df["open"].values
+    hi  = df["high"].values;    lo = df["low"].values
+    atr = df["atr"].values;     e21= df["ema21"].values
+    e50 = df["ema50"].values;   rs = df["rsi"].values
+    adx = df["adx"].values;     sw = df["swing_low"].values
+    calm= df["calm"].values;    hr = df["hour_utc"].values
+    tup = htf["htf_trend_up"].values
+    tsl = htf["htf_slope_up"].values
+    tri = htf["htf_rsi_ok"].values
+    fg  = fga.values
+
+    for i in range(WARMUP, len(df)):
+        px = cl[i]; av = atr[i]; ts = df.index[i]
+
+        if np.isnan(av) or np.isnan(e50[i]) or np.isnan(adx[i]):
+            eqc.append(equity); continue
+
+        fg_ok  = not USE_FG or (FG_MIN <= float(fg[i]) <= FG_MAX)
+        sess   = not USE_SESSION or (SESSION_S <= int(hr[i]) < SESSION_E)
+        htf_ok = bool(tup[i]) and bool(tsl[i]) and bool(tri[i])
+
+        # ── Entry ────────────────────────────────────
+        if pos is None and i > WARMUP:
+            slo = sw[i]; pr = rs[i - 1]
+            ok = [
+                not np.isnan(slo), not np.isnan(pr),
+                px > e50[i],                              # above EMA-50
+                px > slo,                                 # above swing low
+                PB_RSI_LOW <= pr <= PB_RSI_HIGH,          # prior RSI dipped
+                op[i] < cl[i],                            # green bar
+                cl[i] > cl[i - 1],                       # recovering
+                rs[i] < ENTRY_RSI_MAX,                   # not extended
+                abs(px - e21[i]) < PB_ATR_DIST * av,     # near EMA-21
+                bool(calm[i]),                            # calm ATR
+                adx[i] >= ADX_MIN,                       # trend strength
+                htf_ok, sess, fg_ok,
+            ]
+            if all(ok):
+                entry = px * (1 + SLIPPAGE)
+                stop  = slo - STOP_ATR_MULT * av         # TIGHTER: 1.0×ATR
+                rdist = entry - stop
+                if rdist <= 0 or rdist / entry > MAX_STOP_PCT:
+                    eqc.append(equity); continue
+                tgt  = entry + RR_RATIO * rdist           # BIGGER: 2.5R
+                size = (equity * RISK_PER_TRADE) / rdist
+                if size * entry > equity * MAX_NOTIONAL_FRAC:
+                    size = (equity * MAX_NOTIONAL_FRAC) / entry
+                equity -= entry * size * FEE_RATE
+                pos = {"entry": entry, "stop": stop, "target": tgt,
+                       "size": size, "highest": entry, "idx": i,
+                       "ts": ts, "rdist": rdist, "fg": float(fg[i]),
+                       "adx": round(float(adx[i]), 1)}
+
+        # ── Management ───────────────────────────────
+        if pos is not None:
+            h = hi[i]; l = lo[i]
+            if h > pos["highest"]: pos["highest"] = h
+
+            # Trail — activates at 2.0R (LATER than before)
+            pr_r = (pos["highest"] - pos["entry"]) / pos["rdist"]
+            if pr_r >= TRAIL_ACTIVATION_R:
+                trail = pos["highest"] - TRAIL_ATR_MULT * av
+                pos["stop"] = max(pos["stop"], trail)
+
+            # Target checked before stop
+            epx = ewhy = None
+            if h >= pos["target"]:
+                epx = pos["target"] * (1 - SLIPPAGE); ewhy = "target"
+            elif l <= pos["stop"]:
+                epx  = pos["stop"] * (1 - SLIPPAGE)
+                ewhy = "trailing" if pos["stop"] > pos["entry"] else "stop"
+
+            if epx is not None:
+                pnl    = (epx - pos["entry"]) * pos["size"]
+                pnl   -= epx * pos["size"] * FEE_RATE
+                equity += pnl
+                wins   += 1 if pnl > 0 else 0
+                losses += 1 if pnl <= 0 else 0
+                tlog.append({
+                    "entry_time":  pos["ts"], "exit_time": ts,
+                    "entry": round(pos["entry"],2), "exit": round(epx,2),
+                    "stop":  round(pos["stop"],2),  "target": round(pos["target"],2),
+                    "size_btc": round(pos["size"],6), "risk_dist": round(pos["rdist"],2),
+                    "pnl_usd":   round(pnl,2),
+                    "r_multiple": round(pnl/(pos["rdist"]*pos["size"]),3),
+                    "bars_held": i - pos["idx"], "reason": ewhy,
+                    "adx_entry": pos["adx"], "fg_entry": round(pos["fg"],1),
+                    "equity_after": round(equity,2),
+                })
+                pos = None
+        eqc.append(equity)
+
+    if pos is not None:
+        fp   = cl[-1] * (1 - SLIPPAGE)
+        pnl  = (fp - pos["entry"]) * pos["size"]
+        pnl -= fp * pos["size"] * FEE_RATE
+        equity += pnl
+        wins   += 1 if pnl > 0 else 0
+        losses += 1 if pnl <= 0 else 0
+        tlog.append({
+            "entry_time": pos["ts"], "exit_time": df.index[-1],
+            "entry": round(pos["entry"],2), "exit": round(fp,2),
+            "stop": round(pos["stop"],2), "target": round(pos["target"],2),
+            "size_btc": round(pos["size"],6), "risk_dist": round(pos["rdist"],2),
+            "pnl_usd": round(pnl,2),
+            "r_multiple": round(pnl/(pos["rdist"]*pos["size"]),3),
+            "bars_held": len(df)-1-pos["idx"], "reason": "final_close",
+            "adx_entry": pos["adx"], "fg_entry": pos["fg"],
+            "equity_after": round(equity,2),
+        })
+    return {"equity": equity, "eqc": eqc, "tlog": tlog,
+            "wins": wins, "losses": losses, "warmup": WARMUP}
