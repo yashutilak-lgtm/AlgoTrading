@@ -374,3 +374,28 @@ def report(res, df, fg_series, fga):
     print("─"*W_)
     print(f"  Combined stop rate   : {stop_pct:>10.1f}%  {flag}")
     print(f"  Target hit rate      : {tgt_pct:>10.1f}%")
+
+    # Theory vs actual check
+    exp_wl = abs(aw/al) if al else 0
+    bep_wl = (1-wr/100)/(wr/100) if wr else 0
+    gap    = exp_wl - bep_wl
+    print("─"*W_)
+    print(f"  Break-even W/L needed: {bep_wl:>10.3f}×")
+    print(f"  Actual W/L           : {exp_wl:>10.3f}×")
+    gf = " profitable geometry" if gap>0 else f" need {bep_wl-exp_wl:.3f}× more"
+    print(f"  Gap                  : {gap:>+10.3f}×  {gf}")
+    print("═"*W_)
+
+    if not fg_series.empty:
+        lv = int(fg_series.iloc[-1])
+        label=("Extreme Fear" if lv<25 else "Fear" if lv<45 else
+               "Neutral" if lv<55 else "Greed" if lv<80 else "Extreme Greed")
+        blk=sum(1 for v in fga if not (FG_MIN<=v<=FG_MAX))
+        print(f"\n  ON-CHAIN:")
+        print(f"  Fear & Greed today   : {lv} — {label}  ({fg_series.index[-1].date()})")
+        print(f"  Bars gated by F&G    : {blk:,}/{len(fga):,} ({blk/len(fga)*100:.1f}%)")
+
+    pd.DataFrame(tlog).to_csv(f"trades_v7_{TIMEFRAME}.csv", index=False)
+    eq_s.to_csv(f"equity_curve_v7_{TIMEFRAME}.csv", header=["equity"])
+    print(f"\n  Saved: trades_v7_{TIMEFRAME}.csv | equity_curve_v7_{TIMEFRAME}.csv")
+    print("═"*W_)
