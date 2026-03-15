@@ -120,3 +120,43 @@ def build_htf(df: pd.DataFrame) -> pd.DataFrame:
     return (htf.reindex(htf.index.union(df.index))
                .ffill().infer_objects(copy=False)
                .reindex(df.index))
+    
+# ═══════════════════════════════════════════════════
+# INDICATORS
+# ═══════════════════════════════════════════════════
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    pc = df["close"].shift(1)
+    df["tr"]  = np.maximum(df["high"] - df["low"],
+                np.maximum((df["high"] - pc).abs(), (df["low"] - pc).abs()))
+    df["atr"] = df["tr"].rolling(ATR_P).mean()
+    df["ema21"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=EMA_MED,  adjust=False).mean()
+
+    d    = df["close"].diff()
+    gain = d.clip(lower=0).rolling(RSI_P).mean()
+    loss = (-d.clip(upper=0)).rolling(RSI_P).mean()
+    df["rsi"] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+
+    # ADX
+    up   = df["high"] - df["high"].shift(1)
+    dn   = df["low"].shift(1) - df["low"]
+    pdm  = np.where((up > dn) & (up > 0), up, 0.0)
+    mdm  = np.where((dn > up) & (dn > 0), dn, 0.0)
+    a    = 1.0 / ADX_P
+    atrw = pd.Series(df["tr"].values, index=df.index).ewm(alpha=a, adjust=False).mean()
+    pdi  = 100 * pd.Series(pdm, index=df.index).ewm(alpha=a, adjust=False).mean() / atrw.replace(0, np.nan)
+    mdi  = 100 * pd.Series(mdm, index=df.index).ewm(alpha=a, adjust=False).mean() / atrw.replace(0, np.nan)
+    dx   = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    df["adx"] = dx.ewm(alpha=a, adjust=False).mean()
+
+    rmin = df["low"].rolling(SWING_W * 2 + 1, center=False).min()
+    df["swing_low"] = df["low"].where(df["low"] == rmin).shift(SWING_W)
+
+    df["atr_pct"]    = df["atr"] / df["close"]
+    df["atr_pct_ma"] = df["atr_pct"].rolling(50).mean()
+    df["calm"]       = df["atr_pct"] < df["atr_pct_ma"] * 1.8
+    df["hour_utc"]   = df.index.hour
+
+    print(f"Indicators done ({TIMEFRAME}).")
+    return df
